@@ -1,0 +1,240 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isModeratorOrAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'rabiafroj43@gmail.com' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['moderator', 'admin', 'superadmin']
+      );
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'rabiafroj43@gmail.com' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'superadmin'
+      );
+    }
+
+    function isAdminOrSuperAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'rabiafroj43@gmail.com' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'superadmin']
+      );
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow read: if true;
+      allow create: if isOwner(userId);
+      // Users can only update their own non-privileged fields
+      allow update: if (
+        isOwner(userId) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'status', 'verified', 'isBanned', 'isSuspended', 'banned', 'accountStatus', 'banReason', 'bannedAt', 'bannedBy', 'suspendedAt', 'suspendedBy', 'verificationStatus', 'badgeStatus', 'verificationApprovedAt', 'verificationApprovedBy', 'verificationRejectedAt', 'verificationRejectedBy', 'monetizationEnabled', 'monetizationStatus', 'monetizationEnabledAt', 'monetizationApprovedBy', 'monetizationRejectedAt'])
+      ) || isModeratorOrAdmin();
+      allow delete: if isOwner(userId) || isSuperAdmin();
+    }
+
+    // Username reservation mapping
+    match /usernames/{username} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update, delete: if isModeratorOrAdmin();
+    }
+
+    // Posts Collection (Text only). Private posts are readable only by their author and moderators/admins.
+    match /posts/{postId} {
+      allow read: if resource.data.privacy != 'private' || isOwner(resource.data.authorId) || isModeratorOrAdmin();
+      allow create: if isAuthenticated() &&
+        request.resource.data.authorId == request.auth.uid &&
+        request.resource.data.content.size() <= 5000;
+      allow update: if (
+        isAuthenticated() &&
+        (
+          // Post author editing their content
+          (resource.data.authorId == request.auth.uid &&
+           request.resource.data.content.size() <= 5000) ||
+          // Public counter updates (likes, reposts, comments, bookmarks)
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount', 'commentsCount', 'repostsCount', 'bookmarksCount', 'viewsCount', 'isPinned'])
+        )
+      ) || isModeratorOrAdmin();
+      allow delete: if isAuthenticated() && (resource.data.authorId == request.auth.uid || isModeratorOrAdmin());
+    }
+
+    // Stories Collection (text-only, expire after 24 hours in the UI)
+    match /stories/{storyId} {
+      allow read: if true;
+      allow create: if isAuthenticated() &&
+        request.resource.data.authorId == request.auth.uid &&
+        request.resource.data.thought is string &&
+        request.resource.data.thought.size() > 0 &&
+        request.resource.data.thought.size() <= 500;
+      allow update: if (isAuthenticated() && resource.data.authorId == request.auth.uid) || (isAuthenticated() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewers', 'viewerIds']) && request.auth.uid in request.resource.data.viewerIds);
+      allow delete: if isAuthenticated() && (resource.data.authorId == request.auth.uid || isModeratorOrAdmin());
+    }
+
+    // Comments Collection (Text only)
+    match /comments/{commentId} {
+      allow read: if true;
+      allow create: if isAuthenticated() &&
+        request.resource.data.authorId == request.auth.uid &&
+        request.resource.data.content.size() <= 1000;
+      allow update: if isOwner(resource.data.authorId) && request.resource.data.content.size() <= 1000;
+      allow delete: if isOwner(resource.data.authorId) || isModeratorOrAdmin();
+    }
+
+    // Likes Collection
+    match /likes/{likeId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    // Bookmarks Collection
+    match /bookmarks/{bookmarkId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    // Follows Collection
+    match /follows/{followId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.followerId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.followerId == request.auth.uid;
+    }
+
+    // Follow Requests Collection
+    match /followRequests/{requestId} {
+      allow read: if isAuthenticated() && (
+        resource.data.requesterId == request.auth.uid ||
+        resource.data.targetId == request.auth.uid
+      );
+      allow create: if isAuthenticated() && request.resource.data.requesterId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && (
+        resource.data.targetId == request.auth.uid ||
+        resource.data.requesterId == request.auth.uid
+      );
+    }
+
+    // Notifications Collection
+    match /notifications/{notifId} {
+      allow read: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+    }
+
+    // Conversations Collection (Private Messaging)
+    match /conversations/{conversationId} {
+      allow read: if isAuthenticated() && request.auth.uid in resource.data.participantIds;
+      allow create: if isAuthenticated() && request.auth.uid in request.resource.data.participantIds;
+      allow update: if isAuthenticated() && request.auth.uid in resource.data.participantIds;
+
+      // Messages Subcollection
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+        allow create: if isAuthenticated() &&
+          request.resource.data.senderId == request.auth.uid &&
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+        // A participant may only update read receipts; message content and sender stay immutable.
+        allow update: if isAuthenticated() &&
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds &&
+          request.resource.data.senderId == resource.data.senderId &&
+          request.resource.data.text == resource.data.text &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          request.resource.data.readBy is list && request.auth.uid in request.resource.data.readBy;
+      }
+    }
+
+    // Reports Collection (Moderation Queue)
+    match /reports/{reportId} {
+      allow read: if isModeratorOrAdmin();
+      allow create: if isAuthenticated() && request.resource.data.reporterId == request.auth.uid;
+      allow update, delete: if isModeratorOrAdmin();
+    }
+
+    // Identity verification requests. ID images are compressed and stored in Firestore
+    // because Firebase Storage is intentionally disabled. Keep access tightly restricted.
+    match /verification_requests/{requestId} {
+      allow create: if isAuthenticated() &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.paymentAmount == 120 &&
+        request.resource.data.documentNumber is string &&
+        request.resource.data.documentNumber.size() >= 4 &&
+        request.resource.data.documentNumber.size() <= 60 &&
+        request.resource.data.transactionId is string &&
+        request.resource.data.transactionId.size() >= 6 &&
+        request.resource.data.transactionId.size() <= 80 &&
+        request.resource.data.frontImageData is string &&
+        request.resource.data.frontImageData.size() <= 310000 &&
+        request.resource.data.backImageData is string &&
+        request.resource.data.backImageData.size() <= 310000 &&
+        request.resource.data.paymentMethod in ['bKash', 'Nagad'];
+      allow read: if (isAuthenticated() && resource.data.uid == request.auth.uid) || isAdminOrSuperAdmin();
+      allow update: if isAdminOrSuperAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // Monetization applications: only the applicant and trusted admins can read sensitive identity/payout details.
+    match /monetizationRequests/{userId} {
+      allow create: if isOwner(userId) && request.resource.data.uid == request.auth.uid && request.resource.data.status == 'pending';
+      allow read: if isOwner(userId) || isAdminOrSuperAdmin();
+      allow update: if isAdminOrSuperAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // Creator wallets: owners can view their own balance; only trusted admins can adjust ledger totals.
+    match /creatorWallets/{userId} {
+      allow read: if isOwner(userId) || isAdminOrSuperAdmin();
+      allow create, update, delete: if isAdminOrSuperAdmin();
+    }
+
+    // Cash-out requests: creators can submit/read only their own requests; admins handle payouts.
+    match /cashoutRequests/{requestId} {
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid && request.resource.data.status == 'pending' && request.resource.data.amount is number && request.resource.data.amount > 0 && request.resource.data.amount <= 100000000 && request.resource.data.payoutMethod in ['bKash', 'Nagad'] && request.resource.data.payoutNumber is string && request.resource.data.payoutNumber.size() >= 8 && request.resource.data.payoutNumber.size() <= 20 && get(/databases/$(database)/documents/monetizationRequests/$(request.auth.uid)).data.status == 'approved' && get(/databases/$(database)/documents/creatorWallets/$(request.auth.uid)).data.availableBalance >= request.resource.data.amount;
+      allow read: if isAuthenticated() && (resource.data.uid == request.auth.uid || isAdminOrSuperAdmin());
+      allow update: if isAdminOrSuperAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // Publicly readable monetization terms; only admins can edit them.
+    match /appConfig/{configId} {
+      allow read: if true;
+      allow write: if isAdminOrSuperAdmin();
+    }
+
+    // Admin Audit Logs Collection
+    match /adminAuditLogs/{logId} {
+      allow read: if isModeratorOrAdmin();
+      allow create: if isModeratorOrAdmin();
+    }
+
+    // Platform Announcements Collection
+    match /announcements/{announcementId} {
+      allow read: if true;
+      allow write: if isModeratorOrAdmin();
+    }
+
+    // Platform Settings Collection
+    match /platformSettings/{settingId} {
+      allow read: if true;
+      allow write: if isModeratorOrAdmin();
+    }
+  }
+}
